@@ -1,0 +1,369 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>纯触屏桌球</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: Arial, sans-serif;
+            background-color: #2c3e50;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            overflow: hidden;
+        }
+        
+        #topBar {
+            position: absolute;
+            top: 10px;
+            left: 50%;
+            transform: translateX(-50%);
+            color: white;
+            text-align: center;
+            background: rgba(0,0,0,0.3);
+            padding: 10px 20px;
+            border-radius: 10px;
+        }
+        
+        #levelDisplay {
+            font-size: 20px;
+            margin-bottom: 5px;
+        }
+        
+        #progressBar {
+            width: 200px;
+            height: 10px;
+            background: #444;
+            border-radius: 5px;
+            overflow: hidden;
+            margin: 5px auto;
+        }
+        
+        #progressFill {
+            height: 100%;
+            background: linear-gradient(to right, #ffd93d, #ff8c00);
+            width: 0%;
+            transition: width 0.3s;
+        }
+        
+        #progressText {
+            font-size: 14px;
+        }
+        
+        #scoreDisplay {
+            color: white;
+            font-size: 20px;
+            margin: 10px 0;
+        }
+        
+        #gameCanvas {
+            background-color: #27ae60;
+            border: 10px solid #8b4513;
+            border-radius: 10px;
+            box-shadow: 0 0 20px rgba(0,0,0,0.5);
+            touch-action: none;
+        }
+        
+        #resetButton {
+            margin-top: 10px;
+            padding: 10px 20px;
+            font-size: 16px;
+            background-color: #ff8c00;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-weight: bold;
+            transition: background-color 0.3s;
+        }
+        
+        #resetButton:hover {
+            background-color: #ff7f00;
+        }
+        
+        #resetButton:active {
+            transform: scale(0.95);
+        }
+        
+        #levelUpMessage {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            color: #ffd93d;
+            font-size: 42px;
+            font-weight: bold;
+            display: none;
+            text-shadow: 0 0 15px rgba(0,0,0,0.9);
+            animation: levelUpAnim 1.2s ease-out;
+        }
+        
+        @keyframes levelUpAnim {
+            0% { transform: translate(-50%, -50%) scale(0.5); opacity: 0; }
+            50% { transform: translate(-50%, -50%) scale(1.2); opacity: 1; }
+            100% { transform: translate(-50%, -50%) scale(1); opacity: 1; }
+        }
+    </style>
+</head>
+<body>
+    <div id="topBar">
+        <div id="levelDisplay">等级: 0</div>
+        <div id="progressBar">
+            <div id="progressFill"></div>
+        </div>
+        <div id="progressText">0/6</div>
+    </div>
+    <div id="scoreDisplay">得分: 0 | 击球次数: 0/3 | 本局总分: 0</div>
+    <canvas id="gameCanvas"></canvas>
+    <button id="resetButton">重置</button>
+    <div id="levelUpMessage">等级提升!</div>
+
+    <script>
+/******************************************************************
+ *  纯触屏桌球 – 修复127/86、白球瞬消、负值减速、清台+5
+ ******************************************************************/
+const canvas = document.getElementById('gameCanvas');
+const ctx = canvas.getContext('2d');
+const scoreDisplay = document.getElementById('scoreDisplay');
+const resetButton = document.getElementById('resetButton');
+const levelDisplay = document.getElementById('levelDisplay');
+const progressFill = document.getElementById('progressFill');
+const progressText = document.getElementById('progressText');
+const levelUpMessage = document.getElementById('levelUpMessage');
+
+/* ========== 游戏状态 ========== */
+let score = 0, balls = [], cueBall = null, isAiming = false;
+let aimStart = null, aimEnd = null, pockets = [];
+let shotsTaken = 0, totalScore = 0, roundScores = [], needReset = false;
+let level = 0, levelProgress = 0;
+const MAX_LEVEL_ATTR = 40;
+let unlock10Shown = false;
+
+/* ---------- 公式 ---------- */
+function getRequiredForLevel(l) {
+  return l <= MAX_LEVEL_ATTR ? 6  + l * 2 : 86;
+}
+function getShotsPerRound(l) {
+  if (l <= 10) return 3;
+  return Math.min(3 + (l - 10), 20);
+}
+function getPowerMultiplier(l) {
+  return l >= MAX_LEVEL_ATTR ? 1 + MAX_LEVEL_ATTR * 0.15 : 1 + l * 0.15;
+}
+function getBounceEfficiency(l) {
+  return l >= MAX_LEVEL_ATTR ? Math.min(0.9 + MAX_LEVEL_ATTR * 0.03, 0.98)
+                             : Math.min(0.9 + l * 0.03, 0.98);
+}
+
+/* ========== 字幕 ========== */
+function showSubtitle(text) {
+  levelUpMessage.style.cssText = `
+    display:block; color:#ffd93d; font-size:18px; font-weight:bold;
+    position:absolute; top:50%; left:50%; transform:translate(-50%,-50%);
+    text-shadow:0 0 6px #000;`;
+  levelUpMessage.textContent = text;
+  setTimeout(() => levelUpMessage.style.display = 'none', 1000);
+}
+
+/* ========== 初始化 ========== */
+function resizeCanvas() {
+  const maxWidth = window.innerWidth * 0.95;
+  const maxHeight = window.innerHeight * 0.6;
+  const aspectRatio = 2 / 1;
+  if (maxWidth / maxHeight > aspectRatio) {
+    canvas.height = maxHeight; canvas.width = maxHeight * aspectRatio;
+  } else {
+    canvas.width = maxWidth; canvas.height = maxWidth / aspectRatio;
+  }
+  initializeGame();
+}
+function initializeGame() {
+  balls = []; pockets = [];
+  const pr = 20;
+  [[pr,pr],[canvas.width/2,pr],[canvas.width-pr,pr],
+   [pr,canvas.height-pr],[canvas.width/2,canvas.height-pr],[canvas.width-pr,canvas.height-pr]]
+    .forEach(p=>pockets.push({x:p[0],y:p[1],radius:pr}));
+
+  cueBall = {x:canvas.width/4,y:canvas.height/2,vx:0,vy:0,radius:12,color:'white',type:'cue'};
+  const colors = ['#ff0000','#ff6b6b','#ffd93d','#6bcf7f','#4ecdc4','#45b7d1','#96ceb4'];
+  const sx = canvas.width*0.65, sy = canvas.height/2;
+  for(let row=0,idx=0;row<5;row++){
+    for(let col=0;col<=row;col++,idx++){
+      balls.push({x:sx+row*25,y:sy+(col-row/2)*25,vx:0,vy:0,radius:12,color:colors[idx%colors.length],type:'color'});
+    }
+  }
+  balls.push(cueBall);
+  needReset = false; shotsTaken = 0;
+  updateScoreDisplay(); draw();
+}
+
+/* ========== 等级/文案 ========== */
+function updateLevel() {
+  const req = getRequiredForLevel(level);
+  const prog = Math.min(levelProgress/req,1);
+  levelDisplay.textContent = `等级: ${level}`;
+  progressFill.style.width = `${prog*100}%`;
+progressText.textContent = `${Math.floor(levelProgress)}/${req}`;
+  if(prog>=1&&levelProgress>=req){
+    level++;
+    levelProgress = 0;   //清空之前的球数
+    if(level===11&&!unlock10Shown){
+      showSubtitle('解锁额外击球机会！');
+      unlock10Shown=true;
+    }
+  }
+}
+function updateScoreDisplay(){
+  scoreDisplay.textContent = `得分: ${score} | 击球: ${shotsTaken}/${getShotsPerRound(level)} | 本局: ${score}`;
+}
+
+/* ========== 瞄准虚线 ========== */
+function calculateBounceLinesWithBalls(start,end){
+  const lines=[]; let cur={...start},tar={...end},maxB=5;
+  for(let i=0;i<maxB;i++){
+    const dx=tar.x-cur.x,dy=tar.y-cur.y;
+    if(Math.abs(dx)<.1&&Math.abs(dy)<.1)break;
+    let t=1,hx=0,hy=0,hitBall=null;
+    for(const b of balls){
+      if(b.type==='cue')continue;
+      const mag=Math.hypot(dx,dy);if(!mag)continue;
+      const nx=dx/mag,ny=dy/mag,cx=b.x-cur.x,cy=b.y-cur.y,dot=cx*nx+cy*ny;
+      const nearX=cur.x+nx*dot,nearY=cur.y+ny*dot,dist=Math.hypot(b.x-nearX,b.y-nearY);
+      if(dist<=b.radius&&dot>=0&&dot<=mag){const tb=dot/mag;if(tb<t&&tb>0.01){t=tb;hitBall=b;}}}
+    if(!hitBall){
+      if(dx>0){const tx=(canvas.width-cur.x)/dx;if(tx<t&&tx>0.01){t=tx;hx=1;}}
+      else if(dx<0){const tx=-cur.x/dx;if(tx<t&&tx>0.01){t=tx;hx=1;}}
+      if(dy>0){const ty=(canvas.height-cur.y)/dy;if(ty<t&&ty>0.01){t=ty;hy=1;hx=0;}}
+      else if(dy<0){const ty=-cur.y/dy;if(ty<t&&ty>0.01){t=ty;hy=1;hx=0;}}}
+    const ix=cur.x+dx*t,iy=cur.y+dy*t;
+    lines.push({start:cur,end:{x:ix,y:iy}});if(t>=1)break;
+    let ndx=dx*(1-t),ndy=dy*(1-t);
+    if(hitBall){
+      const ang=Math.atan2(iy-hitBall.y,ix-hitBall.x),nx=Math.cos(ang),ny=Math.sin(ang);
+      const dot=ndx*nx+ndy*ny;ndx-=2*dot*nx;ndy-=2*dot*ny;
+    }else{if(hx)ndx=-ndx;if(hy)ndy=-ndy;}
+    cur={x:ix,y:iy};tar={x:ix+ndx,y:iy+ndy};
+  }return lines;
+}
+
+/* ========== 绘制 ========== */
+function draw(){
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+  ctx.fillStyle='#000';pockets.forEach(p=>{ctx.beginPath();ctx.arc(p.x,p.y,p.radius,0,Math.PI*2);ctx.fill();});
+  balls.forEach(b=>{ctx.beginPath();ctx.arc(b.x,b.y,b.radius,0,Math.PI*2);ctx.fillStyle=b.color;ctx.fill();ctx.strokeStyle='#000';ctx.lineWidth=1;ctx.stroke();});
+  if(isAiming&&aimStart&&aimEnd){
+    ctx.strokeStyle='rgba(255,255,255,.5)';ctx.lineWidth=1;ctx.setLineDash([3,3]);
+    ctx.beginPath();ctx.moveTo(aimStart.x,aimStart.y);ctx.lineTo(aimEnd.x,aimEnd.y);ctx.stroke();
+    const fwd=calculateBounceLinesWithBalls(aimStart,{x:aimStart.x+(aimStart.x-aimEnd.x)*3,y:aimStart.y+(aimStart.y-aimEnd.y)*3});
+    ctx.strokeStyle='rgba(255,255,0,.7)';ctx.lineWidth=2;ctx.setLineDash([5,5]);
+    fwd.forEach(l=>{ctx.beginPath();ctx.moveTo(l.start.x,l.start.y);ctx.lineTo(l.end.x,l.end.y);ctx.stroke();});
+    ctx.setLineDash([]);
+  }
+}
+
+/* ========== 物理更新 ========== */
+function update(){
+  let allStop=true;
+  const eff=getBounceEfficiency(level);
+  balls.forEach(b=>{
+    if(Math.hypot(b.vx,b.vy)>.01){
+      allStop=false;b.x+=b.vx;b.y+=b.vy;b.vx*=0.96;b.vy*=0.96;
+      if(b.x-b.radius<0||b.x+b.radius>canvas.width){b.vx=-b.vx*eff;b.x=Math.max(b.radius,Math.min(canvas.width-b.radius,b.x));}
+      if(b.y-b.radius<0||b.y+b.radius>canvas.height){b.vy=-b.vy*eff;b.y=Math.max(b.radius,Math.min(canvas.height-b.radius,b.y));}
+    }else{b.vx=0;b.vy=0;}
+  });
+  /* -------- 进球检测（只改这里） -------- */
+for(let i=balls.length-1;i>=0;i--){
+  const b=balls[i];
+  for(const p of pockets){
+    if(Math.hypot(b.x-p.x,b.y-p.y)<p.radius-b.radius/3){
+      if(b.type==='color'){
+        const req=getRequiredForLevel(level);
+        if(levelProgress<req)levelProgress++;   // 正常+1（上限锁死）
+        score+=10;updateLevel();updateScoreDisplay();
+        balls.splice(i,1);break;
+      }else if(b.type==='cue'){
+        /* 白球进洞：扣“当前所需进球数” */
+        const req=getRequiredForLevel(level - Math.floor(level/20));      // ← 当前等级所需值
+        score=Math.max(0,score-req);               // ← 扣分=所需值
+        levelProgress=Math.max(0,levelProgress-req/3); // ← 直接减进度
+        updateLevel();updateScoreDisplay();
+        b.vx=0;b.vy=0;balls.splice(i,1);needReset=true;break;
+      }
+    }
+  }
+}
+
+  /* -------- 碰撞检测 -------- */
+  for(let i=0;i<balls.length;i++){
+    for(let j=i+1;j<balls.length;j++){
+      const b1=balls[i],b2=balls[j],dx=b2.x-b1.x,dy=b2.y-b1.y,dist=Math.hypot(dx,dy);
+      if(dist<b1.radius+b2.radius){
+        const ang=Math.atan2(dy,dx),sin=Math.sin(ang),cos=Math.cos(ang);
+        const vx1=b1.vx*cos+b1.vy*sin,vy1=b1.vy*cos-b1.vx*sin;
+        const vx2=b2.vx*cos+b2.vy*sin,vy2=b2.vy*cos-b2.vx*sin;
+        const m=1,nvx1=vx2,nvx2=vx1;
+        b1.vx=nvx1*cos-vy1*sin;b1.vy=vy1*cos+nvx1*sin;
+        b2.vx=nvx2*cos-vy2*sin;b2.vy=vy2*cos+nvx2*sin;
+        const over=b1.radius+b2.radius-dist;
+        b1.x-=over*cos/2;b1.y-=over*sin/2;
+        b2.x+=over*cos/2;b2.y+=over*sin/2;
+      }
+    }
+  }
+  draw();
+  if(!allStop){requestAnimationFrame(update);return;}
+  /* -------- 结束检测 & 字幕 & 清台+5 -------- */
+  const colorLeft=balls.filter(b=>b.type==='color').length;
+  if(needReset){
+    showSubtitle('白球入洞');totalScore+=score;roundScores.push(score);initializeGame();return;
+  }
+  if(colorLeft===0){
+    levelProgress+=5;updateLevel();showSubtitle('恭喜你！打完所有球');totalScore+=score;roundScores.push(score);initializeGame();return;
+  }
+  if(shotsTaken>=getShotsPerRound(level)){
+    showSubtitle('本局回合结束');totalScore+=score;roundScores.push(score);initializeGame();return;
+  }
+}
+
+/* ========== 事件 ========== */
+function handleStart(x,y){
+  if(shotsTaken>=getShotsPerRound(level))return;
+  if(Math.hypot(x-cueBall.x,y-cueBall.y)<cueBall.radius+50){isAiming=true;aimStart={x:cueBall.x,y:cueBall.y};aimEnd={x,y};}
+}
+function handleMove(x,y){if(isAiming){aimEnd={x,y};draw();}}
+function handleEnd(){
+  if(isAiming&&aimStart&&aimEnd&&shotsTaken<getShotsPerRound(level)){
+    const dx=aimEnd.x-aimStart.x,dy=aimEnd.y-aimStart.y;
+    const pow=Math.hypot(dx,dy)/10,mult=getPowerMultiplier(level);
+    cueBall.vx=-dx/pow*0.5*mult;cueBall.vy=-dy/pow*0.5*mult;
+    isAiming=false;aimStart=null;aimEnd=null;shotsTaken++;updateScoreDisplay();update();
+  }
+}
+resetButton.addEventListener('click',()=>{totalScore=0;level=0;levelProgress=0;unlock10Shown=false;initializeGame();});
+function getPos(e){const r=canvas.getBoundingClientRect();return{x:(e.touches?e.touches[0].clientX:e.clientX)-r.left,y:(e.touches?e.touches[0].clientY:e.clientY)-r.top};}
+canvas.addEventListener('touchstart',e=>{e.preventDefault();const p=getPos(e);handleStart(p.x,p.y);});
+canvas.addEventListener('touchmove',e=>{e.preventDefault();const p=getPos(e);handleMove(p.x,p.y);});
+canvas.addEventListener('touchend',e=>{e.preventDefault();handleEnd();});
+canvas.addEventListener('mousedown',e=>{const p=getPos(e);handleStart(p.x,p.y);});
+canvas.addEventListener('mousemove',e=>{const p=getPos(e);handleMove(p.x,p.y);});
+canvas.addEventListener('mouseup',e=>{handleEnd();});
+
+/* ========== 启动 ========== */
+window.addEventListener('resize',resizeCanvas);
+resizeCanvas();
+updateLevel();
+updateScoreDisplay();
+draw();
+    </script>
+</body>
+</html>
